@@ -1,3 +1,5 @@
+import { supabase } from "../../supabase";
+
 import { useState, useEffect } from "react";
 import { Navigation } from "./navigation";
 import { Check, Plus, Edit2, Trash2 } from "lucide-react";
@@ -74,15 +76,35 @@ export function TodayChecklist() {
     localStorage.setItem("exercises", JSON.stringify(newExercises));
   };
 
-  const toggleExercise = (exerciseId: string) => {
-    const newRecords = { ...records };
-    if (!newRecords[todayKey]) {
-      newRecords[todayKey] = {};
-    }
-    newRecords[todayKey][exerciseId] = !newRecords[todayKey][exerciseId];
-    setRecords(newRecords);
-    localStorage.setItem("exerciseRecords", JSON.stringify(newRecords));
-  };
+  const toggleExercise = async (exerciseId: string) => {
+    console.log("🔥 toggleExercise called", exerciseId);
+  const newRecords = { ...records };
+
+  if (!newRecords[todayKey]) {
+    newRecords[todayKey] = {};
+  }
+
+  newRecords[todayKey][exerciseId] = !newRecords[todayKey][exerciseId];
+  setRecords(newRecords);
+  localStorage.setItem("exerciseRecords", JSON.stringify(newRecords));
+
+  const completed = newRecords[todayKey][exerciseId];
+
+  const { error } = await supabase
+    .from("exercise_logs")
+    .upsert({
+      date: todayKey,
+      exercise_id: exerciseId,
+      completed,
+    },    { onConflict: "date,exercise_id" }
+  );
+
+if (error) console.error(error);
+};
+
+
+
+
 
   const isChecked = (exerciseId: string): boolean => {
     return records[todayKey]?.[exerciseId] || false;
