@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "../../supabase";
 import { Navigation } from "./navigation";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -50,6 +50,14 @@ function lastDayOfMonth(year: number, month1to12: number) {
   return new Date(year, month1to12, 0).getDate(); // month1to12의 마지막 날
 }
 
+function monthRange(date: Date) {
+  const year = date.getFullYear();
+  const month1to12 = date.getMonth() + 1;
+  const start = ymd(year, month1to12, 1);
+  const end = ymd(year, month1to12, lastDayOfMonth(year, month1to12));
+  return { year, month1to12, start, end };
+}
+
 export function MonthlyCalendar() {
   const [records, setRecords] = useState<ExerciseRecord>({});
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -57,6 +65,15 @@ export function MonthlyCalendar() {
   const [visibleExercises, setVisibleExercises] = useState<Set<string>>(
     new Set(DEFAULT_EXERCISES.map((e) => e.id))
   );
+
+  // ✅ 최초 진입 때만 빈 화면 로딩
+  const [loading, setLoading] = useState(true);
+
+  // ✅ realtime 핸들러에서 최신 currentDate를 보기 위한 ref
+  const currentDateRef = useRef(currentDate);
+  useEffect(() => {
+    currentDateRef.current = currentDate;
+  }, [currentDate]);
 
   // ✅ exercises는 Supabase에서 로드
   const fetchExercises = async () => {
@@ -89,11 +106,7 @@ export function MonthlyCalendar() {
 
   // ✅ 월별 records는 exercise_logs에서 월 범위로 로드
   const fetchMonthRecords = async (date: Date) => {
-    const year = date.getFullYear();
-    const month1to12 = date.getMonth() + 1;
-
-    const start = ymd(year, month1to12, 1);
-    const end = ymd(year, month1to12, lastDayOfMonth(year, month1to12));
+    const { start, end } = monthRange(date);
 
     const { data, error } = await supabase
       .from("exercise_logs")
@@ -115,20 +128,72 @@ export function MonthlyCalendar() {
     setRecords(next);
   };
 
-  // 최초 1회: exercises + 해당 월 records 로드
+  // ✅ 최초 1회: exercises + 해당 월 records 로드 (이때만 빈 화면)
   useEffect(() => {
     (async () => {
+      setLoading(true);
       await fetchExercises();
       await fetchMonthRecords(currentDate);
+      setLoading(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 월 바뀔 때마다 해당 월 records 다시 로드
+  // ✅ 월 바뀔 때: 화면은 유지하고(빈 화면 X) 데이터만 갱신
   useEffect(() => {
     fetchMonthRecords(currentDate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentDate]);
+
+  // ✅ Today 탭에서 체크하면(=exercise_logs 변경) 캘린더도 즉시 반영되게 realtime 구독
+  useEffect(() => {
+    const channel = supabase
+      .channel("exercise-logs-realtime")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "exercise_logs" },
+        (payload) => {
+          // payload.new / payload.old 구조는 이벤트에 따라 다름
+          const row = (payload.new ?? payload.old) as any;
+          if (!row?.date || !row?.exercise_id) return;
+
+          // 현재 보고 있는 월 범위에 해당하는 변경만 반영
+          const { start, end } = monthRange(currentDateRef.current);
+          const d = String(row.date);
+          if (d < start || d > end) return;
+
+          if (payload.eventType === "DELETE") {
+            // 삭제 이벤트면 해당 키 제거
+            setRecords((prev) => {
+              const next = { ...prev };
+              if (!next[d]) return prev;
+              const day = { ...next[d] };
+              delete day[String(row.exercise_id)];
+              next[d] = day;
+              return next;
+            });
+            return;
+          }
+
+          // INSERT/UPDATE
+          const completed = !!row.completed;
+          setRecords((prev) => {
+            const next = { ...prev };
+            next[d] = { ...(next[d] || {}) };
+            next[d][String(row.exercise_id)] = completed;
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  // ✅ 로딩 중엔 빈 화면
+  if (loading) return null;
 
   const getDaysInMonth = (date: Date) => {
     const year = date.getFullYear();
@@ -163,7 +228,7 @@ export function MonthlyCalendar() {
     setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1));
   };
 
-  const calendarDays = [];
+  const calendarDays: (number | null)[] = [];
   for (let i = 0; i < startDayOfWeek; i++) calendarDays.push(null);
   for (let day = 1; day <= daysInMonth; day++) calendarDays.push(day);
 
