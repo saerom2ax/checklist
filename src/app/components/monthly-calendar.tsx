@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { supabase } from "../../supabase";
 import { Navigation } from "./navigation";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -7,12 +8,19 @@ interface Exercise {
   name: string;
   emoji: string;
   color: string;
+  created_at?: string;
 }
 
 interface ExerciseRecord {
   [date: string]: {
     [exerciseId: string]: boolean;
   };
+}
+
+interface ExerciseLogRow {
+  date: string; // YYYY-MM-DD
+  exercise_id: string;
+  completed: boolean;
 }
 
 const DEFAULT_EXERCISES: Exercise[] = [
@@ -34,6 +42,14 @@ const COLORS = [
   "bg-indigo-500",
 ];
 
+function ymd(year: number, month1to12: number, day: number) {
+  return `${year}-${String(month1to12).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function lastDayOfMonth(year: number, month1to12: number) {
+  return new Date(year, month1to12, 0).getDate(); // month1to12의 마지막 날
+}
+
 export function MonthlyCalendar() {
   const [records, setRecords] = useState<ExerciseRecord>({});
   const [currentDate, setCurrentDate] = useState(new Date());
@@ -42,24 +58,77 @@ export function MonthlyCalendar() {
     new Set(DEFAULT_EXERCISES.map((e) => e.id))
   );
 
-  useEffect(() => {
-    const savedRecords = localStorage.getItem("exerciseRecords");
-    if (savedRecords) {
-      setRecords(JSON.parse(savedRecords));
+  // ✅ exercises는 Supabase에서 로드
+  const fetchExercises = async () => {
+    const { data, error } = await supabase
+      .from("exercises")
+      .select("*")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("[exercises select error]", error);
+      return;
     }
 
-    const savedExercises = localStorage.getItem("exercises");
-    if (savedExercises) {
-      const loaded = JSON.parse(savedExercises);
-      // 색상이 없는 경우 기본 색상 할당
-      const exercisesWithColors = loaded.map((ex: any, index: number) => ({
+    if (data && data.length > 0) {
+      const fixed = (data as any[]).map((ex, index) => ({
         ...ex,
         color: ex.color || COLORS[index % COLORS.length],
       }));
-      setExercises(exercisesWithColors);
-      setVisibleExercises(new Set(exercisesWithColors.map((e: Exercise) => e.id)));
+      setExercises(fixed as Exercise[]);
+      setVisibleExercises(new Set((fixed as Exercise[]).map((e) => e.id)));
+      return;
     }
+
+    // DB 비어있으면 기본값 넣기
+    const { error: insertError } = await supabase.from("exercises").insert(DEFAULT_EXERCISES);
+    if (insertError) console.error("[exercises insert default error]", insertError);
+    setExercises(DEFAULT_EXERCISES);
+    setVisibleExercises(new Set(DEFAULT_EXERCISES.map((e) => e.id)));
+  };
+
+  // ✅ 월별 records는 exercise_logs에서 월 범위로 로드
+  const fetchMonthRecords = async (date: Date) => {
+    const year = date.getFullYear();
+    const month1to12 = date.getMonth() + 1;
+
+    const start = ymd(year, month1to12, 1);
+    const end = ymd(year, month1to12, lastDayOfMonth(year, month1to12));
+
+    const { data, error } = await supabase
+      .from("exercise_logs")
+      .select("date, exercise_id, completed")
+      .gte("date", start)
+      .lte("date", end);
+
+    if (error) {
+      console.error("[exercise_logs select error]", error);
+      return;
+    }
+
+    const next: ExerciseRecord = {};
+    for (const row of (data ?? []) as ExerciseLogRow[]) {
+      if (!next[row.date]) next[row.date] = {};
+      next[row.date][row.exercise_id] = !!row.completed;
+    }
+
+    setRecords(next);
+  };
+
+  // 최초 1회: exercises + 해당 월 records 로드
+  useEffect(() => {
+    (async () => {
+      await fetchExercises();
+      await fetchMonthRecords(currentDate);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 월 바뀔 때마다 해당 월 records 다시 로드
+  useEffect(() => {
+    fetchMonthRecords(currentDate);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentDate]);
 
   const getDaysInMonth = (date: Date) => {
     const year = date.getFullYear();
@@ -68,7 +137,6 @@ export function MonthlyCalendar() {
     const lastDay = new Date(year, month + 1, 0);
     const daysInMonth = lastDay.getDate();
     const startDayOfWeek = (firstDay.getDay() + 6) % 7; // 월요일 시작 (0=월, 6=일)
-
     return { daysInMonth, startDayOfWeek };
   };
 
@@ -82,51 +150,34 @@ export function MonthlyCalendar() {
 
   const toggleExercise = (exerciseId: string) => {
     const newVisible = new Set(visibleExercises);
-    if (newVisible.has(exerciseId)) {
-      newVisible.delete(exerciseId);
-    } else {
-      newVisible.add(exerciseId);
-    }
+    if (newVisible.has(exerciseId)) newVisible.delete(exerciseId);
+    else newVisible.add(exerciseId);
     setVisibleExercises(newVisible);
   };
 
   const previousMonth = () => {
-    setCurrentDate(
-      new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1)
-    );
+    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1));
   };
 
   const nextMonth = () => {
-    setCurrentDate(
-      new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1)
-    );
+    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1));
   };
 
   const calendarDays = [];
-  for (let i = 0; i < startDayOfWeek; i++) {
-    calendarDays.push(null);
-  }
-  for (let day = 1; day <= daysInMonth; day++) {
-    calendarDays.push(day);
-  }
+  for (let i = 0; i < startDayOfWeek; i++) calendarDays.push(null);
+  for (let day = 1; day <= daysInMonth; day++) calendarDays.push(day);
 
   return (
     <div className="min-h-screen bg-gray-50 pb-20">
       <div className="max-w-md mx-auto px-3 py-6">
         <div className="flex items-center justify-between mb-6">
-          <button
-            onClick={previousMonth}
-            className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-          >
+          <button onClick={previousMonth} className="p-2 hover:bg-gray-200 rounded-full transition-colors">
             <ChevronLeft size={28} />
           </button>
           <h1 className="text-3xl">
             {currentDate.getFullYear()}년 {currentDate.getMonth() + 1}월
           </h1>
-          <button
-            onClick={nextMonth}
-            className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-          >
+          <button onClick={nextMonth} className="p-2 hover:bg-gray-200 rounded-full transition-colors">
             <ChevronRight size={28} />
           </button>
         </div>
@@ -141,9 +192,7 @@ export function MonthlyCalendar() {
                   key={exercise.id}
                   onClick={() => toggleExercise(exercise.id)}
                   className={`px-3 py-1.5 rounded-full text-sm transition-all ${
-                    isVisible
-                      ? `${exercise.color} text-white`
-                      : "bg-gray-200 text-gray-400"
+                    isVisible ? `${exercise.color} text-white` : "bg-gray-200 text-gray-400"
                   }`}
                 >
                   {exercise.emoji} {exercise.name}
@@ -172,9 +221,7 @@ export function MonthlyCalendar() {
           {/* 날짜 그리드 */}
           <div className="grid grid-cols-7 gap-1">
             {calendarDays.map((day, index) => {
-              if (day === null) {
-                return <div key={`empty-${index}`} className="aspect-square" />;
-              }
+              if (day === null) return <div key={`empty-${index}`} className="aspect-square" />;
 
               const dateKey = getDateKey(day);
               const dayRecords = records[dateKey] || {};
@@ -183,9 +230,8 @@ export function MonthlyCalendar() {
               );
 
               const dayOfWeek = (startDayOfWeek + day - 1) % 7;
-              const isWeekend = dayOfWeek >= 5; // 토요일(5), 일요일(6)
+              const isWeekend = dayOfWeek >= 5;
 
-              // 오늘 날짜 확인
               const today = new Date();
               const isToday =
                 day === today.getDate() &&
@@ -199,19 +245,13 @@ export function MonthlyCalendar() {
                     isWeekend ? "bg-gray-50 border-gray-200" : "border-gray-100"
                   } ${isToday ? "ring-2 ring-blue-400" : ""}`}
                 >
-                  <div
-                    className={`text-base text-center mb-1 ${
-                      isToday ? "font-semibold text-blue-500" : ""
-                    }`}
-                  >
+                  <div className={`text-base text-center mb-1 ${isToday ? "font-semibold text-blue-500" : ""}`}>
                     {day}
                   </div>
+
                   <div className="flex-1 flex flex-wrap gap-0.5 justify-center content-start">
                     {completedExercises.map((exercise) => (
-                      <div
-                        key={exercise.id}
-                        className={`w-2 h-2 rounded-full ${exercise.color}`}
-                      />
+                      <div key={exercise.id} className={`w-2 h-2 rounded-full ${exercise.color}`} />
                     ))}
                   </div>
                 </div>
